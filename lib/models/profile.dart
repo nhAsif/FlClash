@@ -3,9 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:fl_clash/clash/core.dart';
-import 'package:fl_clash/common/common.dart';
-import 'package:fl_clash/enum/enum.dart';
+import 'package:errorx/clash/clash.dart';
+import 'package:errorx/common/common.dart';
+import 'package:errorx/common/encryption_service.dart';
+import 'package:errorx/common/secure_memory_service.dart';
+import 'package:errorx/enum/enum.dart';
+import 'package:equatable/equatable.dart';
 import 'package:freezed_annotation/freezed_annotation.dart';
 
 import 'clash_config.dart';
@@ -162,6 +165,76 @@ extension ProfileExtension on Profile {
     return file;
   }
 
+  /// Get file content using secure memory service
+  /// This no longer stores readable YAML in memory
+  Future<String> getFileContent() async {
+    final file = await getFile();
+    final bytes = await file.readAsBytes();
+    
+    // Check if the file is already in secure cache
+    if (SecureMemoryService.isProfileSecured(id)) {
+      // Use secure profile access - only decrypts temporarily
+      return await SecureMemoryService.withSecureProfile(id, (yamlContent) async {
+        return yamlContent;
+      });
+    }
+    
+    // Store in secure cache and return content
+    SecureMemoryService.storeSecureProfile(id, bytes);
+    return await SecureMemoryService.withSecureProfile(id, (yamlContent) async {
+      return yamlContent;
+    });
+  }
+
+  /// Prepares the profile for Clash Core using secure memory
+  /// This method ensures no readable YAML is cached in memory
+  Future<void> prepareForClashCore() async {
+    final file = await getFile();
+    final bytes = await file.readAsBytes();
+    
+    // Don't do anything for empty files
+    if (bytes.isEmpty) {
+      return;
+    }
+    
+    // Check if this content is already in secure cache
+    if (SecureMemoryService.isProfileSecured(id)) {
+      return; // Already prepared securely
+    }
+    
+    // Store in secure cache (encrypted + obfuscated format)
+    SecureMemoryService.storeSecureProfile(id, bytes);
+  }
+
+  /// Access the profile content securely with a callback function
+  /// The content is only decrypted temporarily during the operation
+  Future<T> withSecureContent<T>(Future<T> Function(String yamlContent) operation) async {
+    final file = await getFile();
+    final bytes = await file.readAsBytes();
+    
+    // Ensure it's in secure cache
+    if (!SecureMemoryService.isProfileSecured(id)) {
+      SecureMemoryService.storeSecureProfile(id, bytes);
+    }
+    
+    // Use secure access - content is only readable during the callback
+    return await SecureMemoryService.withSecureProfile(id, operation);
+  }
+
+  /// Legacy method - now redirects to secure content access
+  @Deprecated('Use withSecureContent instead for better security')
+  Future<T> withDecryptedContent<T>(Future<T> Function(Uint8List decryptedBytes) operation) async {
+    return await withSecureContent<T>((yamlContent) async {
+      final bytes = Uint8List.fromList(utf8.encode(yamlContent));
+      try {
+        return await operation(bytes);
+      } finally {
+        // Clear the temporary bytes
+        bytes.fillRange(0, bytes.length, 0);
+      }
+    });
+  }
+
   Future<int> get profileLastModified async {
     final file = await getFile();
     return (await file.lastModified()).microsecondsSinceEpoch;
@@ -178,9 +251,35 @@ extension ProfileExtension on Profile {
   }
 
   Future<Profile> saveFile(Uint8List bytes) async {
-    final message = await clashCore.validateConfig(utf8.decode(bytes));
-    if (message.isNotEmpty) {
-      throw message;
+    try {
+      // Check if the incoming data is already encrypted
+      if (EncryptionService.hasEncryptionHeader(bytes)) {
+        commonPrint.log("Importing encrypted profile - processing securely");
+        try {
+          // Process using secure content access
+          final data = utf8.decode(EncryptionService.decrypt(bytes), allowMalformed: false).trim();
+          return await saveFileWithString(data);
+        } catch (e) {
+          commonPrint.log("Failed to decrypt encrypted profile: $e");
+          throw "Unable to import encrypted profile: The file appears to be corrupted or uses a different encryption key";
+        }
+      } else {
+        // Handle as plain text (unencrypted) data
+        try {
+          final data = utf8.decode(bytes, allowMalformed: false).trim();
+          return await saveFileWithString(data);
+        } catch (e) {
+          commonPrint.log("UTF-8 decode error: $e");
+          throw "Profile decode error: The file is not a valid UTF-8 text or YAML configuration";
+        }
+      }
+    } catch (e) {
+      // Only log specific error if it's not already a formatted message string
+      if (e is! String) {
+        commonPrint.log("Profile import error: $e");
+        throw "Profile import failed: The file format is not supported";
+      }
+      throw e;
     }
     final file = await getFile();
     await file.writeAsBytes(bytes);
@@ -192,8 +291,43 @@ extension ProfileExtension on Profile {
     if (message.isNotEmpty) {
       throw message;
     }
-    final file = await getFile();
-    await file.writeAsString(value);
-    return copyWith(lastUpdateDate: DateTime.now());
+    
+    try {
+      // Validate the configuration using Clash Core
+      final message = await clashCore.validateConfig(data);
+      if (message.isNotEmpty) {
+        commonPrint.log("Profile validation error: $message");
+        throw message;
+      }
+      
+      final file = await getFile();
+      
+      // Convert string to bytes
+      final rawBytes = utf8.encode(data);
+      
+      // Always encrypt before saving to disk
+      final encryptedBytes = EncryptionService.encrypt(Uint8List.fromList(rawBytes));
+      
+      await file.writeAsBytes(encryptedBytes);
+      
+      // Store in secure memory cache (removes any old cache)
+      SecureMemoryService.clearSecureProfile(id);
+      SecureMemoryService.storeSecureProfile(id, encryptedBytes);
+      
+      return copyWith(lastUpdateDate: DateTime.now());
+    } catch (e) {
+      // Add better error logging
+      if (e is String) {
+        throw e; // Already formatted error message
+      } else {
+        commonPrint.log("Error saving profile: $e");
+        throw "Failed to save profile: ${e.toString()}";
+      }
+    }
+  }
+
+  @Deprecated('Use ensureGoEncryptionInitialized instead - this method creates security vulnerability')
+  Future<void> temporarilyDecryptForCore() async {
+    throw UnimplementedError('Use ensureGoEncryptionInitialized instead');
   }
 }
