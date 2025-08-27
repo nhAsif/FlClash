@@ -80,6 +80,22 @@ class GlobalState {
     await window?.init(version);
   }
 
+  Future<void> _shakingProvider() async {
+    final profileIds = config.profiles.map((item) => item.id);
+    final providersRootPath = await appPath.getProvidersRootPath();
+    final providersDir = Directory(providersRootPath);
+    final isExists = await providersDir.exists();
+    if (!isExists) {
+      return;
+    }
+    await for (final entity in providersDir.list()) {
+      final name = basename(entity.path);
+      if(!profileIds.contains(name)){
+        File(entity.path)
+      }
+    }
+  }
+
   Future<void> _initDynamicColor() async {
     try {
       corePalette = await DynamicColorPlugin.getCorePalette();

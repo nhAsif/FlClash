@@ -14,16 +14,15 @@ extension ArchiveExt on Archive {
         final data = entity.readAsBytesSync();
         final archiveFile = ArchiveFile(relativePath, data.length, data);
         addFile(archiveFile);
-      } else if (entity is Directory) {
-        addDirectoryToArchive(entity.path, parentPath);
       }
+      // else if (entity is Directory) {
+      //   addDirectoryToArchive(entity.path, parentPath);
+      // }
     }
   }
 
   void addTextFile<T>(String name, T raw) {
     final data = json.encode(raw);
-    addFile(
-      ArchiveFile.string(name, data),
-    );
+    addFile(ArchiveFile.string(name, data));
   }
 }
